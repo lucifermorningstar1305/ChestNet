@@ -72,6 +72,8 @@ class Classifier(nn.Module):
         self.model.add_module("avg_pool", nn.AdaptiveAvgPool2d(output_size=(1, 1))) # (1 x 1 x 512)
         self.model.add_module("fc", nn.Linear(in_features=512, out_features=1)) 
 
+        self.flatten = nn.Flatten()
+
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
@@ -88,8 +90,7 @@ class Classifier(nn.Module):
         out = self.model.layer_8(out)
 
         out = self.model.avg_pool(out)
-        out = out.flatten()
-
+        out = self.flatten(out)
         out = self.model.fc(out)
 
         return out

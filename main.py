@@ -13,12 +13,14 @@ import wandb
 import lightning as L
 import argparse
 
-from scripts.callbacks import CustomEarlyStopping, CustomModelCheckpoint
+from scripts.callbacks import CustomEarlyStopping, CustomModelCheckpoint, GenerateCallbacks
 from scripts.make_dataloader import AnomalyDataLoader
 from scripts.train_script_anomaly import CustomTrainer
 
 from models.anomaly_models import Generator, Discriminator
 
+L.seed_everything(32)
+torch.cuda.empty_cache()
 
 if __name__ == "__main__":
 
@@ -27,6 +29,7 @@ if __name__ == "__main__":
     parser.add_argument("--objective", "-o", required=True, type=str, help="the objective anomaly/classification")
     parser.add_argument("--csv_path", "-p", required=True, type=str, help="the csv path for the tabular data")
     parser.add_argument("--latent_dim", "-l", required=False, type=int, default=100, help="the latent dimension")
+    parser.add_argument("--lr", "-L", required=False, type=float, default=1e-3, help="the learning rate")
     parser.add_argument("--train_batch_size", "-B", required=False, default=32, type=int, help="training batch size")
     parser.add_argument("--val_batch_size", "-b", required=False, default=64, type=int, help="validation batch size")
     parser.add_argument("--checkpoint_dir", "-C", required=False, default="./checkpoints", type=str, help="model checkpoint directory")
@@ -43,11 +46,12 @@ if __name__ == "__main__":
     checkpoint_file = args.checkpoint_file
     latent_dim = args.latent_dim
     max_epochs = args.max_epochs
+    lr = args.lr
 
     if objective == "anomaly":
         wandb.login()
         run = wandb.init(project="GANomaly_ChestNet", name="ede_disc")
-        
+
         df = pd.read_csv(csv_path)
         anom_dataloader_obj = AnomalyDataLoader(normal_label="No Finding", val_size=.2, 
                                                 batch_sizes={"train":train_batch_size, "val":val_batch_size})
@@ -70,6 +74,7 @@ if __name__ == "__main__":
 
         generator = Generator(latent_dim=latent_dim)
         discriminator = Discriminator()
+
         optimizer_g = torch.optim.Adam
         optimizer_d = torch.optim.Adam
 
@@ -77,8 +82,21 @@ if __name__ == "__main__":
         model_chkpt = CustomModelCheckpoint(monitor="val_loss_gen_per_epoch", direction="min", chkpt_dir=checkpoint_dir, 
                                             chkpt_fn=checkpoint_file, verbose=True)
         
-        trainer = CustomTrainer(accelerator="cuda", max_epochs=max_epochs, precision=16, logger=run, 
-                                callbacks={"early_stop_callback": early_stopping, "checkpoint_callback": model_chkpt})
+        gen_callback = GenerateCallbacks(val_ds)
+        
+        train_cfg = {
+            "lr_g": lr,
+            "lr_d": lr,
+            "betas_g": (.5, .999),
+            "betas_d": (.5, .999)
+
+        }
+        trainer = CustomTrainer(train_cfg=train_cfg, 
+                                accelerator="cuda", 
+                                max_epochs=max_epochs, 
+                                precision=16, 
+                                logger=run, 
+                                callbacks={"early_stop_callback": early_stopping, "checkpoint_callback": model_chkpt, "gen_callback": gen_callback})
         
         trainer.fit(dict(generator=generator, discriminator=discriminator), 
                     train_dl, 

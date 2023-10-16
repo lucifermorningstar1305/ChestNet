@@ -14,8 +14,9 @@ import lightning as L
 import os
 import sys
 
-from scripts.callbacks import CustomEarlyStopping, CustomModelCheckpoint
+from scripts.utils import init_weights
 from rich.progress import Progress, MofNCompleteColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
+
 
 class CustomTrainer(object):
     def __init__(self, train_cfg: Optional[Dict]={}, 
@@ -56,6 +57,7 @@ class CustomTrainer(object):
         self.ckpt_callback = callbacks.get("checkpoint_callback", None) if callbacks is not None else None
         self.early_stop_callback = callbacks.get("early_stop_callback", None) if callbacks is not None else None
 
+        self.gen_callback = callbacks.get("gen_callback", None) if callbacks is not None else None
 
         self.fabric = L.Fabric(accelerator=accelerator, strategy=strategy, devices=devices, precision=precision)
         self.fabric.launch()
@@ -91,9 +93,12 @@ class CustomTrainer(object):
         else:
             return torch.pow((inputs - targets), 2)
     
-    def _get_l1_loss(self, inputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def _get_l1_loss(self, inputs: torch.Tensor, targets: torch.Tensor, reduction: Optional[str]=None) -> torch.Tensor:
 
-        return torch.mean(torch.abs(inputs - targets))
+        if reduction == "mean":
+            return torch.mean(torch.abs(inputs - targets))
+        else:
+            return torch.abs(inputs - targets)
     
     def _get_disc_loss(self, real: torch.Tensor, fake: torch.Tensor, model: nn.Module) -> torch.Tensor:
 
@@ -124,7 +129,7 @@ class CustomTrainer(object):
 
 
         adv_loss = self._get_l2_loss(real_img_rep, fake_img_rep, reduction="mean")
-        cont_loss = self._get_l1_loss(real, gen_img)
+        cont_loss = self._get_l1_loss(real, gen_img, reduction="mean")
         enc_loss = self._get_l2_loss(z, zhat, reduction="mean")
 
         gen_loss = -1 * (self.advesarial_loss_wt*adv_loss + self.contextual_loss_wt * cont_loss + self.encoder_loss_wt * enc_loss)
@@ -142,30 +147,26 @@ class CustomTrainer(object):
             val_loader = self.fabric.setup_dataloaders(val_loader)
 
 
-        generator = model["generator"]
-        discriminator = model["discriminator"]
+        self.generator = model["generator"]
+        self.discriminator = model["discriminator"]
 
-        optimizer_g = optimizer["generator"](generator.parameters(), lr=self.lr_gen, betas=self.betas_g)
-        optimizer_d = optimizer["discriminator"](discriminator.parameters(), lr=self.lr_disc, betas=self.betas_d)
+        self.generator.apply(init_weights)
+        self.discriminator.apply(init_weights)
 
-        generator, optimizer_g = self.fabric.setup(generator, optimizer_g)
-        discriminator, optimizer_d = self.fabric.setup(discriminator, optimizer_d)
+        self.optimizer_g = optimizer["generator"](self.generator.parameters(), lr=self.lr_gen, betas=self.betas_g)
+        self.optimizer_d = optimizer["discriminator"](self.discriminator.parameters(), lr=self.lr_disc, betas=self.betas_d)
+
+        generator, optimizer_g = self.fabric.setup(self.generator, self.optimizer_g)
+        discriminator, optimizer_d = self.fabric.setup(self.discriminator, self.optimizer_d)
 
 
         if val_loader is not None:
-            self.val_step(val_loader, dict(generator=generator, discriminator=discriminator), do_log=False, sanity_check=True)
+            self.val_step(val_loader, do_log=False, sanity_check=True)
 
         for epoch in range(self.max_epochs):
 
-            train_res = self.train_step(epoch, 
-                                        dict(generator=generator, discriminator=discriminator), 
-                                        train_loader, 
-                                        dict(optimizer_g=optimizer_g, optimizer_d=optimizer_d))
+            train_res = self.train_step(epoch, train_loader)
 
-            generator = train_res["generator"]
-            discriminator = train_res["discriminator"]
-            optimizer_g = train_res["optimizer_g"]
-            optimizer_d = train_res["optimizer_d"]
             
             train_loss_gen_per_step = train_res["train_loss_gen_per_step"]
             train_loss_disc_per_step = train_res["train_loss_disc_per_step"]
@@ -179,10 +180,7 @@ class CustomTrainer(object):
             if val_loader is not None:
                 if (epoch + 1) % self.validate_interval == 0:
                     
-                    val_res = self.val_step(val_loader, 
-                                            dict(generator=generator, discriminator=discriminator), 
-                                            do_log=True, 
-                                            sanity_check=False)
+                    val_res = self.val_step(val_loader, do_log=True, sanity_check=False)
                     
                     val_loss_gen_per_step = val_res["val_loss_gen_per_step"]
                     val_loss_disc_per_step = val_res["val_loss_disc_per_step"]
@@ -218,10 +216,13 @@ class CustomTrainer(object):
                         dict(generator=generator, discriminator=discriminator), 
                         dict(generator=optimizer_g, discriminator=optimizer_d), 
                         self.fabric)
+                
+            if self.gen_callback is not None:
+                self.gen_callback.log_image(generator, self.logger)
 
 
 
-    def train_step(self, epoch: int, model: Dict, train_loader: torch.utils.data.DataLoader, optimizer: Dict) -> Dict:
+    def train_step(self, epoch: int, train_loader: torch.utils.data.DataLoader) -> Dict:
 
         prog_bar = Progress(
             TextColumn("[progress.percentage] {task.description}"),
@@ -234,10 +235,6 @@ class CustomTrainer(object):
             transient=True
         )
 
-        generator = model["generator"]
-        discriminator = model["discriminator"]
-        optimizer_g = optimizer["optimizer_g"]
-        optimizer_d = optimizer["optimizer_d"]
 
         train_loss_gen_per_step = list()
         train_loss_disc_per_step = list()
@@ -255,22 +252,22 @@ class CustomTrainer(object):
                 ####################################################################################
 
                 d_losses = list()
-                discriminator.train()
+                self.discriminator.train()
 
                 for _ in range(self.n_critic_repeats):
                     
-                    optimizer_d.zero_grad()
+                    self.optimizer_d.zero_grad()
                     
-                    _, fake_img, _ = generator(img)
+                    _, fake_img, _ = self.generator(img)
 
-                    dloss = self._get_disc_loss(img, fake_img, discriminator)
+                    dloss = self._get_disc_loss(img, fake_img, self.discriminator)
 
                     d_losses.append(dloss.item())
                     
                     self.fabric.backward(dloss)
 
                     if idx % self.grad_accum_steps == 0:
-                        optimizer_d.step()
+                        self.optimizer_d.step()
 
                 train_loss_disc_per_step.append(np.mean(d_losses))
 
@@ -278,15 +275,15 @@ class CustomTrainer(object):
                 ################################ TRAIN GENERATOR ##########################################
                 ###########################################################################################
 
-                generator.train()
-                optimizer_g.zero_grad()
+                self.generator.train()
+                self.optimizer_g.zero_grad()
                 
-                gen_loss = self._get_gen_loss(img, generator, discriminator)
+                gen_loss = self._get_gen_loss(img, self.generator, self.discriminator)
 
                 self.fabric.backward(gen_loss)
 
                 if idx % self.grad_accum_steps == 0:
-                    optimizer_g.step()
+                    self.optimizer_g.step()
 
                 train_loss_gen_per_step.append(gen_loss.item())
 
@@ -295,17 +292,13 @@ class CustomTrainer(object):
 
         
         return {
-            "generator" : generator,
-            "discriminator": discriminator,
-            "optimizer_g": optimizer_g,
-            "optimizer_d": optimizer_d,
             "train_loss_gen_per_step": train_loss_gen_per_step,
             "train_loss_disc_per_step": train_loss_disc_per_step
         }
 
             
 
-    def val_step(self, val_loader: torch.utils.data.DataLoader, model: Dict, do_log: Optional[bool]=True, 
+    def val_step(self, val_loader: torch.utils.data.DataLoader,do_log: Optional[bool]=True, 
                  sanity_check: Optional[bool]=False) -> Dict:
         
         prog_bar = Progress(
@@ -319,8 +312,6 @@ class CustomTrainer(object):
             transient=True
         )
 
-        generator = model["generator"]
-        discriminator = model["discriminator"]
 
         val_loss_gen_per_step = list()
         val_loss_disc_per_step = list()
@@ -340,8 +331,8 @@ class CustomTrainer(object):
                 if idx == 2 and sanity_check:
                     break
 
-                generator.eval()
-                discriminator.eval()
+                self.generator.eval()
+                self.discriminator.eval()
 
                 img = batch["img"]
                 
@@ -349,14 +340,14 @@ class CustomTrainer(object):
                 ############### DISCRIMINATOR LOSS ########################
                 ###########################################################
                 
-                _, fake_img, _ = generator(img)
-                disc_loss = self._get_disc_loss(img, fake_img, discriminator)
+                _, fake_img, _ = self.generator(img)
+                disc_loss = self._get_disc_loss(img, fake_img, self.discriminator)
                 val_loss_disc_per_step.append(disc_loss.item())
 
                 ###############################################################
                 ################### GENERATOR LOSS ############################
                 ###############################################################
-                gen_loss = self._get_gen_loss(img, generator, discriminator)
+                gen_loss = self._get_gen_loss(img, self.generator, self.discriminator)
                 val_loss_gen_per_step.append(gen_loss.item())
 
                 if do_log:

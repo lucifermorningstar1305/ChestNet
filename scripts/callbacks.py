@@ -1,7 +1,11 @@
 from typing import Optional, Dict, Any, Callable
 
 import numpy as np
+import torch
+import torch.utils.data as td
+import torchvision
 import os
+import wandb
 
 from glob import glob
 
@@ -18,6 +22,9 @@ class CustomModelCheckpoint(object):
 
         self._loss = np.inf if direction == "min" else 0
 
+        n_files = len(glob(self.chkpt_dir+f"/{self.chkpt_fn}*.ckpt"))
+        self.chkpt_path = os.path.join(self.chkpt_dir, self.chkpt_fn+f"_v-{n_files}.ckpt")
+
         if not os.path.exists(chkpt_dir):
             os.mkdir(chkpt_dir)
 
@@ -26,8 +33,6 @@ class CustomModelCheckpoint(object):
         if self.monitor not in losses:
             raise Exception(f"Could not find {self.monitor} in losses")
 
-        n_files = len(glob(self.chkpt_dir+f"/{self.chkpt_fn}*.ckpt"))
-        chkpt_path = os.path.join(self.chkpt_dir, self.chkpt_fn+f"_v-{n_files}.ckpt")
 
         state = {
             "generator": models["generator"],
@@ -38,10 +43,10 @@ class CustomModelCheckpoint(object):
 
         if (self.direction == "min" and losses[self.monitor] < self._loss) or (self.direction == "max" and losses[self.monitor] > self._loss):
             if self.verbose:
-                print(f"Saving model checkpoint to {chkpt_path}")
+                print(f"Saving model checkpoint to {self.chkpt_path}")
 
             self._loss = losses[self.monitor]
-            fabric.save(chkpt_path, state)
+            fabric.save(self.chkpt_path, state)
 
         
 class CustomEarlyStopping(object):
@@ -66,6 +71,8 @@ class CustomEarlyStopping(object):
             self._loss = losses[self.monitor]
             self.counter = 0
         
+        elif losses[self.monitor] == np.nan:
+            return True
         else:
             print(f"{losses[self.monitor]} was not in the top-1")
             self.counter += 1
@@ -73,3 +80,19 @@ class CustomEarlyStopping(object):
         return self.counter >= self.patience
 
             
+class GenerateCallbacks(object):
+    def __init__(self, samples: torch.utils.data.Dataset):
+
+        self.samples = samples
+
+    def log_image(self, model: torch.nn.Module, logger: Any):
+
+        with torch.no_grad():
+            model.eval()
+            
+            imgs = torch.stack([self.samples[i]["img"] for i in range(8)], dim=0).to(model.device)
+            _, gen_imgs, _ = model(imgs)
+
+            final_imgs = torch.stack([imgs.detach(), gen_imgs.detach()], dim=1).flatten(0, 1)
+            grid = torchvision.utils.make_grid(final_imgs, nrow=2)
+            logger.log({"samples": [wandb.Image(grid, caption="Reconstructed images")]})
