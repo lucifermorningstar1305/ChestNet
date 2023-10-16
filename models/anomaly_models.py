@@ -101,6 +101,8 @@ class Discriminator(nn.Module):
         self.model.add_module("avg_pool", nn.AdaptiveAvgPool2d(output_size=(1, 1))) # (1 x 1 x 512)
         self.model.add_module("fc", nn.Linear(in_features=512, out_features=1))
 
+        self.flatten = nn.Flatten()
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
 
         x = self.model.layer_1(x)
@@ -109,10 +111,25 @@ class Discriminator(nn.Module):
         x = self.model.layer_4(x)
         x = self.model.layer_5(x)
         avg_pool = self.model.avg_pool(x)
-        out = self.model.fc(avg_pool.flatten())
+        flatten_x = self.flatten(avg_pool)
+        out = self.model.fc(flatten_x)
 
         return out, avg_pool
     
 
 
+
+class Generator(nn.Module):
+    def __init__(self, latent_dim: int):
+        super().__init__()
+        self.encoder1 = Encoder(latent_dim=latent_dim)
+        self.decoder = Decoder(latent_dim=latent_dim)
+        self.encoder2 = Encoder(latent_dim=latent_dim)
+
+    def forward(self, x:torch.Tensor) -> torch.Tensor:
+        z = self.encoder1(x)
+        x_hat = self.decoder(z)
+        z_hat = self.encoder2(x_hat)
+
+        return z, x_hat, z_hat
 
