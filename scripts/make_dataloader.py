@@ -26,15 +26,26 @@ class NormalDataLoader(object):
         self.train_dataloader = None
         self.val_dataloader = None
 
-    def setup(self, data: Any, resize: Optional[Tuple]=None, transformations: Optional[Dict]=None):
+    def setup(self, data: Any, label_map: Optional[Dict]=None, resize: Optional[Tuple]=None, transformations: Optional[Dict]=None):
 
-        data = data.loc[data["label"] == self.normal_label]
+        if label_map is None:
+            data = data.loc[data["label"] == self.normal_label]
+
+        else:
+            data["label"] = data["label"].apply(lambda x: "Normal" if x == self.normal_label else "Anomaly")
+
+        val_data = None
 
         if self.val_size:
             train_data, val_data = train_test_split(data, test_size=self.val_size, random_state=32, shuffle=True)
+        else:
+            train_data = data
 
-        self.train_dataset = ChextDataset(train_data, None, resize, transformations["train"])
-        self.val_dataset = ChextDataset(val_data, None, resize, transformations["val"]) if self.val_size else None
+
+        self.train_dataset = ChextDataset(train_data, label_map, resize, transformations["train"])
+
+        if val_data is not None:
+            self.val_dataset = ChextDataset(val_data, label_map, resize, transformations["val"]) if self.val_size else None
 
     
     def get_train(self) -> List:
@@ -74,11 +85,16 @@ class AnomalyDataLoader(object):
 
         label_map = {v:k for k, v in enumerate(data["label"].unique())}
 
+        val_data = None
         if self.val_size:
             train_data, val_data = train_test_split(data, test_size=self.val_size, random_state=32, shuffle=True)
+        else:
+            train_data = data
 
         self.train_dataset = ChextDataset(train_data, label_map, resize, transformations["train"])
-        self.val_dataset = ChextDataset(val_data, label_map, resize, transformations["val"]) if self.val_size else None
+
+        if val_data is not None:
+            self.val_dataset = ChextDataset(val_data, label_map, resize, transformations["val"]) if self.val_size else None
 
     
     def get_train(self) -> List:
@@ -98,4 +114,23 @@ class AnomalyDataLoader(object):
     def n_classes(self):
         return self._n_classes
     
+        
+class TestingDataLoader(object):
+    def __init__(self, label_map: Dict, batch_size: Optional[int]=32):
+
+        self.label_map = label_map
+        self.batch_size = batch_size
+
+        self.dataset = None
+        self.dataloader = None
+
+    def setup(self, data: Any, resize: Optional[Tuple]=None, transformations: Optional[Callable]=None):
+
+        self.dataset = ChextDataset(data, LABEL_MAP=self.label_map, resize=resize, transformations=transformations)
+
+    def get_test(self) -> Tuple:
+        
+        self.dataloader = td.DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False, num_workers=4)
+
+        return self.dataset, self.dataloader
         

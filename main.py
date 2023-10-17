@@ -23,7 +23,7 @@ from scripts.train_script_anomaly import CustomTrainer
 from scripts.train_classifier import LitClassifier
 
 from models.anomaly_models import Generator, Discriminator
-from models.classifier_model import Classifier
+from models.classifier_model import Classifier, EfficientClassifier
 
 L.seed_everything(32)
 torch.cuda.empty_cache()
@@ -32,7 +32,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--objective", "-o", required=True, type=str, help="the objective anomaly/classification")
+    parser.add_argument("--objective", "-o", required=True, type=str, help="the objective anomaly_u/anomaly_s/classification")
     parser.add_argument("--csv_path", "-p", required=True, type=str, help="the csv path for the tabular data")
     parser.add_argument("--latent_dim", "-l", required=False, type=int, default=100, help="the latent dimension")
     parser.add_argument("--lr", "-L", required=False, type=float, default=1e-3, help="the learning rate")
@@ -56,7 +56,7 @@ if __name__ == "__main__":
 
     df = pd.read_csv(csv_path)
 
-    if objective == "anomaly":
+    if objective == "anomaly_u":
         wandb.login()
         run = wandb.init(project="GANomaly_ChestNet", name="ede_disc")
 
@@ -112,6 +112,49 @@ if __name__ == "__main__":
                     dict(generator=optimizer_g, discriminator=optimizer_d), 
                     val_loader=val_dl)
         
+
+    elif objective == "anomaly_s":
+
+        anomaly_data_obj = NormalDataLoader(normal_label="No Finding", val_size=.2, 
+                                                batch_sizes={"train":train_batch_size, "val":val_batch_size})
+        
+        train_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.RandomVerticalFlip(),
+            torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.RandomRotation((0, 90)),
+            torchvision.transforms.ToTensor(),
+        ])
+
+        val_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.ToTensor()
+        ])
+
+        label_map = {"Normal": 0, "Anomaly": 1}
+        anomaly_data_obj.setup(df, label_map=label_map, transformations=dict(train=train_transforms, val=val_transforms))
+
+        train_ds, train_dl = anomaly_data_obj.get_train()
+        val_ds, val_dl = anomaly_data_obj.get_val()
+
+        # model = Classifier(n_classes=2)
+        model = EfficientClassifier(n_classes=2)
+        lit_model = LitClassifier(model, lr=lr, as_anomaly=False)
+
+        callbacks = [
+            EarlyStopping(monitor="val_recall", patience=10, verbose=True, mode="max"),
+            ModelCheckpoint(monitor="val_recall", mode="max", 
+                            dirpath=checkpoint_dir, filename=checkpoint_file, 
+                            verbose=True, save_on_train_epoch_end=False), RichProgressBar()]
+        
+        logger = WandbLogger(name="anomaly_binary_classifier", project="Anomaly_Classification_ChestNet")
+
+        trainer = pl.Trainer(
+            accelerator="cuda", 
+            devices=1, precision=16, 
+            callbacks=callbacks, logger=logger, 
+            max_epochs=max_epochs)
+        
+        trainer.fit(lit_model, train_dataloaders=train_dl, val_dataloaders=val_dl)
+        
     else:
         anom_data_obj = AnomalyDataLoader("No Finding", val_size=.2, 
                                           batch_sizes=dict(train=train_batch_size, val=val_batch_size))
@@ -120,13 +163,13 @@ if __name__ == "__main__":
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.RandomVerticalFlip(),
             torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.RandomRotation((0, 90)),
             torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
+            
         ])
 
         val_transforms = torchvision.transforms.Compose([
-            torchvision.transforms.ToTensor(),
-            torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
+            torchvision.transforms.ToTensor()
         ])        
 
         anom_data_obj.setup(df, transformations=dict(train=train_transforms, val=val_transforms))
@@ -137,9 +180,9 @@ if __name__ == "__main__":
         n_classes = anom_data_obj.n_classes
 
         classifier = Classifier(n_classes=n_classes)
-        lit_classifier = LitClassifier(classifier, n_classes=n_classes, lr=lr)
+        lit_classifier = LitClassifier(classifier, lr=lr)
 
-        early_stopping = EarlyStopping(monitor="val_loss", 
+        early_stopping = EarlyStopping(monitor="val_recall", 
                                        mode="min", 
                                        patience=10, 
                                        verbose=True)

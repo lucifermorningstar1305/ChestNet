@@ -7,20 +7,27 @@ from typing import Any, List, Optional, Tuple, Dict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+import torchmetrics
 import lightning.pytorch as pl
+import torchmetrics
 
-from scripts.label_smooth_loss import LabelSmoothingLoss
+from scripts.losses import LabelSmoothingLoss, FocalLoss
 
 class LitClassifier(pl.LightningModule):
-    def __init__(self, model: nn.Module, n_classes: int, lr: Optional[float]=1e-3, 
-                 smoothing_factor: Optional[float]=1e-1, min_lr: Optional[float]=1e-6):
+    def __init__(self, model: nn.Module, lr: Optional[float]=1e-3, 
+                 smoothing_factor: Optional[float]=1e-1, min_lr: Optional[float]=1e-6, as_anomaly: Optional[bool]=False):
 
         super().__init__()
 
         self.classifier = model
         self.lr = lr
+        n_classes = model.model.fc.out_features
         self.criterion = LabelSmoothingLoss(num_classes=n_classes, smoothing_factor=smoothing_factor)
+        # self.criterion = LabelSmoothingLoss(num_classes=n_classes, smoothing_factor=smoothing_factor) if not as_anomaly else FocalLoss(alpha=.25, gamma=2)
         self.min_lr = min_lr
+
+        self.recall = torchmetrics.Recall(task="binary" if as_anomaly else "multiclass", num_classes=n_classes, average="micro")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.classifier(x)
@@ -34,11 +41,14 @@ class LitClassifier(pl.LightningModule):
         yhat = self(x)
 
         loss = self._compute_loss(yhat, y)
+        # print(yhat.shape, y.shape)
+        recall_score = self.recall(torch.argmax(yhat, dim=1), y)
 
         return {
             "y": y,
             "yhat": yhat,
-            "loss": loss
+            "loss": loss,
+            "recall_score": recall_score
         }
     
     def training_step(self, batch: torch.Tensor, batch_idx: torch.Tensor) -> Dict:
@@ -54,6 +64,7 @@ class LitClassifier(pl.LightningModule):
 
         res = self._common_steps(batch)
         self.log("val_loss", res["loss"], on_step=False, on_epoch=True, logger=True, prog_bar=True, rank_zero_only=True)
+        self.log("val_recall", res["recall_score"], on_step=False, on_epoch=True, logger=True, prog_bar=True, rank_zero_only=True)
 
     def configure_optimizers(self):
 
