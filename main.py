@@ -11,13 +11,19 @@ import torch.nn as nn
 import torchvision
 import wandb
 import lightning as L
+import lightning.pytorch as pl
 import argparse
 
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, RichProgressBar
+from lightning.pytorch.loggers.wandb import WandbLogger
+
 from scripts.callbacks import CustomEarlyStopping, CustomModelCheckpoint, GenerateCallbacks
-from scripts.make_dataloader import AnomalyDataLoader
+from scripts.make_dataloader import AnomalyDataLoader, NormalDataLoader
 from scripts.train_script_anomaly import CustomTrainer
+from scripts.train_classifier import LitClassifier
 
 from models.anomaly_models import Generator, Discriminator
+from models.classifier_model import Classifier
 
 L.seed_everything(32)
 torch.cuda.empty_cache()
@@ -48,29 +54,32 @@ if __name__ == "__main__":
     max_epochs = args.max_epochs
     lr = args.lr
 
+    df = pd.read_csv(csv_path)
+
     if objective == "anomaly":
         wandb.login()
         run = wandb.init(project="GANomaly_ChestNet", name="ede_disc")
 
-        df = pd.read_csv(csv_path)
-        anom_dataloader_obj = AnomalyDataLoader(normal_label="No Finding", val_size=.2, 
+        norm_dataloader_obj = NormalDataLoader(normal_label="No Finding", val_size=.2, 
                                                 batch_sizes={"train":train_batch_size, "val":val_batch_size})
         
         train_transforms = torchvision.transforms.Compose([
             torchvision.transforms.RandomVerticalFlip(),
             torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.Resize(64),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
         ])
 
         val_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.Resize(64),
             torchvision.transforms.ToTensor(),
             torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
         ])
-        anom_dataloader_obj.setup(df, transformations=dict(train=train_transforms, val=val_transforms))
+        norm_dataloader_obj.setup(df, transformations=dict(train=train_transforms, val=val_transforms))
 
-        train_ds, train_dl = anom_dataloader_obj.get_train()
-        val_ds, val_dl = anom_dataloader_obj.get_val()
+        train_ds, train_dl = norm_dataloader_obj.get_train()
+        val_ds, val_dl = norm_dataloader_obj.get_val()
 
         generator = Generator(latent_dim=latent_dim)
         discriminator = Discriminator()
@@ -102,5 +111,61 @@ if __name__ == "__main__":
                     train_dl, 
                     dict(generator=optimizer_g, discriminator=optimizer_d), 
                     val_loader=val_dl)
+        
+    else:
+        anom_data_obj = AnomalyDataLoader("No Finding", val_size=.2, 
+                                          batch_sizes=dict(train=train_batch_size, val=val_batch_size))
+        
+
+        train_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.RandomVerticalFlip(),
+            torchvision.transforms.RandomHorizontalFlip(),
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
+        ])
+
+        val_transforms = torchvision.transforms.Compose([
+            torchvision.transforms.ToTensor(),
+            torchvision.transforms.Normalize(mean=(0.5,), std=(0.5,))
+        ])        
+
+        anom_data_obj.setup(df, transformations=dict(train=train_transforms, val=val_transforms))
+
+        train_ds, train_dl = anom_data_obj.get_train()
+        val_ds, val_dl = anom_data_obj.get_val()
+
+        n_classes = anom_data_obj.n_classes
+
+        classifier = Classifier(n_classes=n_classes)
+        lit_classifier = LitClassifier(classifier, n_classes=n_classes, lr=lr)
+
+        early_stopping = EarlyStopping(monitor="val_loss", 
+                                       mode="min", 
+                                       patience=10, 
+                                       verbose=True)
+        
+        model_checkpoint = ModelCheckpoint(monitor="val_loss", 
+                                           mode="min", 
+                                           dirpath=checkpoint_dir, 
+                                           filename=checkpoint_file, 
+                                           save_on_train_epoch_end=False)
+        
+        rich_prog_bar = RichProgressBar()
+        callbacks =  [early_stopping, model_checkpoint, rich_prog_bar]
+        logger = WandbLogger(name="resnet18", project="Anomaly_Classification_ChestNet")
+
+        trainer = pl.Trainer(accelerator="cuda", 
+                             devices=1, 
+                             precision=16, 
+                             callbacks=callbacks, 
+                             logger=logger, 
+                             max_epochs=max_epochs)
+        
+        trainer.fit(lit_classifier, train_dataloaders=train_dl, val_dataloaders=val_dl)
+        
+
+
+
+
         
     

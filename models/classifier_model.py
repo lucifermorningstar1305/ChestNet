@@ -48,7 +48,7 @@ class ResidualBlocks(nn.Module):
         return out
 
 class Classifier(nn.Module):
-    def __init__(self):
+    def __init__(self, n_classes: int):
         super().__init__()
 
         self.model = nn.Sequential()
@@ -70,7 +70,7 @@ class Classifier(nn.Module):
         self.model.add_module("layer_8", ResidualBlocks(in_channels=512, out_channels=512, kernel_size=3, stride=1, padding=1)) # (7 x 7 x 512)
 
         self.model.add_module("avg_pool", nn.AdaptiveAvgPool2d(output_size=(1, 1))) # (1 x 1 x 512)
-        self.model.add_module("fc", nn.Linear(in_features=512, out_features=1)) 
+        self.model.add_module("fc", nn.Linear(in_features=512, out_features=n_classes)) 
 
         self.flatten = nn.Flatten()
 
